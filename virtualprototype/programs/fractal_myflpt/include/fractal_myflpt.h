@@ -6,8 +6,85 @@
 typedef uint32_t flt_8exp_t;
 
 static inline flt_8exp_t sum_float(flt_8exp_t flt1, flt_8exp_t flt2){
+    uint32_t exp1 = (flt1 >> 23) & 0xFFU;
+    uint32_t exp2 = (flt2 >> 23) & 0xFFU;
+    
+    char exp1_big = exp1 > exp2;
+    uint32_t diff = exp1_big ? (exp1 - exp2) : (exp2 - exp1);
+    if (diff > 25) {
+        return exp1_big ? flt1 : flt2;
+    }
 
-    return 0;
+    uint64_t mant1 = flt1 & 0x7FFFFFU;
+    if(exp1 == 0 && mant1 == 0){
+        return flt2;
+    }
+    uint32_t mant2 = flt2 & 0x7FFFFFU;
+    if(exp2 == 0 && mant2 == 0){
+        return flt1;
+    }
+    mant1 |= (1U << 23);
+    mant2 |= (1U << 23);
+    
+    uint32_t sign1 = flt1 & 0x80000000U;
+    uint32_t sign2 = flt2 & 0x80000000U;
+    
+    uint32_t exp;
+    uint32_t sign;
+    if(exp1 > exp2){
+        mant2 >>= diff;
+        exp = exp1;
+        sign = sign1;
+    }
+    else if(exp2 > exp1){
+        mant1 >>= diff;
+        exp = exp2;
+        sign = sign2;
+    }
+    else{
+        exp = exp1;
+        if(mant1 > mant2){
+            sign = sign1;
+        }
+        else{
+            sign = sign2;
+        }
+    }
+    
+    uint32_t mant;
+    if(sign1 == sign2){
+        mant = mant1 + mant2;
+        if (mant & (1ULL << 24)) {
+            exp += 1;
+            mant >>= 1;
+        }
+    }
+    else{
+        if(mant1 > mant2){
+            mant = mant1 - mant2;
+        }
+        else{
+            mant = mant2 - mant1;
+            if (mant == 0) {
+                return 0;
+            }
+        }
+        while ((mant & (1ULL << 23)) == 0) {
+            if (exp == 0) {
+                return 0;
+            }
+            mant <<= 1;
+            exp -= 1;
+        }
+    }
+
+    mant &= 0x7FFFFFU;
+    
+    uint32_t res = sign;
+    res |= exp << 23;
+    res |= mant;
+
+    return res;
 }
 
 static inline flt_8exp_t sub_float(flt_8exp_t flt1, flt_8exp_t flt2){

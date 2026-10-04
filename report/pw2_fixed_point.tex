@@ -1,0 +1,293 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\lstset{
+  language=C,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!40!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  morekeywords={int32_t,int64_t,uint16_t,fxpt_4_28,rgb565}
+}
+
+\title{CS-473 System Programming for Systems on Chip\\[0.3em]
+       \large Practical Work 2 -- The Mandelbrot Set\\
+       Part 1: Fixed-Point Implementation}
+% TODO: add your partner's name
+\author{Matheo Chacon}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+The reference program \texttt{fractal\_flpt} computes the Mandelbrot set with
+the C \texttt{float} type. The OpenRISC processor of the virtual prototype has
+no floating-point unit, so every \texttt{float} addition and multiplication is
+done by a software library, which is slow. In this first part we rewrote the
+program as \texttt{fractal\_fxpt}, in which every coordinate and intermediate
+value is a 32-bit fixed-point integer. This report explains the format we
+chose and the changes we made to the three source files.
+
+\section{Choice of the fixed-point format}
+
+The Mandelbrot iteration is
+\[
+  z_{n+1} = z_n^2 + c, \qquad z_0 = 0,
+\]
+which, written with real and imaginary parts, becomes
+\[
+  x_{n+1} = x_n^2 - y_n^2 + c_x, \qquad y_{n+1} = 2x_ny_n + c_y .
+\]
+A point escapes as soon as $x_n^2 + y_n^2 \geq 4$.
+
+To choose the number of integer bits, we need the largest value a 32-bit
+variable has to hold:
+\begin{itemize}
+  \item With the default view, $c_x \in [-2, 1]$ and $c_y \in [-1.5, 1.5]$.
+  \item We only compute $z_{n+1}$ while $|z_n|^2 < 4$, so
+        $|x_n^2 - y_n^2| < 4$ and $|2x_ny_n| \leq x_n^2 + y_n^2 < 4$.
+  \item As a result, $|x_{n+1}| < 4 + 2 = 6$ and $|y_{n+1}| < 4 + 1.5 = 5.5$.
+\end{itemize}
+The integer part must therefore hold values up to about $\pm 6$, which takes
+one sign bit and three magnitude bits. We put all remaining bits in the
+fractional part and chose the \textbf{Q4.28} format:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+  \toprule
+  Range      & $[-8,\; 8 - 2^{-28}]$ \\
+  Resolution & $2^{-28} \approx 3.7 \times 10^{-9}$ \\
+  Constants  & $4.0 = 2^{30}$, \quad $3.0 = 3 \cdot 2^{28}$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+With only three integer bits (Q3.29) the range would be $[-4, 4)$, which is
+too small for the intermediate values computed above. Choosing exactly as many
+integer bits as needed leaves the largest possible number of fractional bits.
+This matters for the next exercise: when we zoom in, the pixel step
+\texttt{delta} becomes very small, and 28 fractional bits allow deep zooms
+before neighbouring pixels map to the same coordinate.
+
+The format is declared in \texttt{include/fractal\_fxpt.h}:
+\begin{lstlisting}
+#define DECIMAL_BITS 28
+#define FIXED_MAX ((1 << (32 - DECIMAL_BITS)) - 1)
+#define FIXED_MIN (-(1 << (32 - DECIMAL_BITS)))
+#define DOUBLE_TO_FXPT_4_28(a)                                     \
+  ((fxpt_4_28)(((a) >= (FIXED_MAX))   ? (INT32_MAX)                \
+               : ((a) <= (FIXED_MIN)) ? (INT32_MIN)                \
+                                      : ((a) * (1 << DECIMAL_BITS))))
+
+typedef int32_t fxpt_4_28; // Q4.28
+\end{lstlisting}
+
+The macro \texttt{DOUBLE\_TO\_FXPT\_4\_28} converts constants such as
+\texttt{-2.0} into Q4.28 by multiplying them by $2^{28}$, and saturates any
+value outside the range. Because it is only applied to constant expressions,
+the compiler evaluates it at compile time, so the program never uses
+floating-point arithmetic at run time.
+
+\section{Implementation}
+
+\subsection{Header: changing the function signatures}
+
+Every \texttt{float} parameter in the header was replaced by
+\texttt{fxpt\_4\_28}:
+\begin{lstlisting}
+typedef uint16_t (*calc_frac_point_p)(fxpt_4_28 cx, fxpt_4_28 cy,
+                                      uint16_t n_max);
+
+uint16_t calc_mandelbrot_point_soft(fxpt_4_28 cx, fxpt_4_28 cy,
+                                    uint16_t n_max);
+
+void draw_fractal(rgb565 *fbuf, int width, int height,
+                  calc_frac_point_p cfp_p, iter_to_colour_p i2c_p,
+                  fxpt_4_28 cx_0, fxpt_4_28 cy_0,
+                  fxpt_4_28 delta, uint16_t n_max);
+\end{lstlisting}
+As the handout specifies, we left the colour-mapping functions
+(\texttt{iter\_to\_bw}, \texttt{iter\_to\_grayscale},
+\texttt{iter\_to\_colour}, \ldots) and \texttt{ilog2} unchanged, since they
+only work on iteration counts.
+
+\subsection{Multiplication (hint 1)}
+
+When two Q4.28 numbers are multiplied, the exact result has 64 bits in the
+Q8.56 format: the integer bits add up ($4+4$) and so do the fractional bits
+($28+28$). To get back to Q4.28, we compute the product in 64 bits and shift
+it right by 28:
+\[
+  a \cdot b \;\longrightarrow\; \bigl((\text{int64})\,a \cdot (\text{int64})\,b\bigr) \gg 28
+  \quad (\text{Q8.56} \to \text{Q8.28}).
+\]
+Before the shift we cast both operands to \texttt{int64\_t}. Without this
+cast, C would perform a 32-bit multiplication and discard the upper half of the
+result. After the shift the value is in Q8.28 and stored in an
+\texttt{int64\_t}, so even a square such as $x^2$ that exceeds 8 is
+represented exactly.
+
+To multiply by two in $2xy$, we shift left by one bit instead of performing a
+multiplication.
+
+\subsection{Overflow handling (hint 2)}
+
+Integer arithmetic gives no warning when a result overflows: it silently wraps
+around. We protect against overflow in three places:
+\begin{enumerate}
+  \item \textbf{Inside the iteration}, we keep every intermediate value
+        ($x^2$, $y^2$, $xy$ and the new $x$ and $y$) in 64-bit variables.
+        Before we store a new value back into a 32-bit \texttt{fxpt\_4\_28},
+        we check that it fits. If it does not fit, the point is clearly
+        diverging, so we stop iterating.
+  \item \textbf{The escape test} $x^2 + y^2 \geq 4$ is also computed in
+        64 bits, so the sum cannot overflow even though it may exceed 8.
+  \item \textbf{When stepping through the pixels} in \texttt{draw\_fractal},
+        we use \texttt{fixed\_add}, which saturates to
+        \texttt{INT32\_MAX}/\texttt{INT32\_MIN} instead of wrapping around.
+\end{enumerate}
+In the default view, the bounds of Section~2 show that case~1 never
+occurs, since all values stay below 6. The check is there for later zoom and
+pan exercises, where $c$ can lie outside the default window.
+
+\subsection{The Mandelbrot kernel}
+
+The floating-point kernel was:
+\begin{lstlisting}
+float x = cx, y = cy;
+do {
+  xx = x * x;  yy = y * y;  two_xy = 2 * x * y;
+  x = xx - yy + cx;
+  y = two_xy + cy;
+  ++n;
+} while (((xx + yy) < 4) && (n < n_max));
+\end{lstlisting}
+Our fixed-point version is:
+\begin{lstlisting}
+uint16_t calc_mandelbrot_point_soft(fxpt_4_28 cx, fxpt_4_28 cy,
+                                    uint16_t n_max) {
+  fxpt_4_28 x = 0;
+  fxpt_4_28 y = 0;
+  uint16_t n = 0;
+  const fxpt_4_28 limit = (fxpt_4_28)4 << DECIMAL_BITS;
+
+  while (n < n_max) {
+    int64_t xx_64 = ((int64_t)x * (int64_t)x) >> DECIMAL_BITS;
+    int64_t yy_64 = ((int64_t)y * (int64_t)y) >> DECIMAL_BITS;
+
+    if ((xx_64 + yy_64) >= limit) {
+      break;
+    }
+
+    int64_t xy_64 = ((int64_t)x * (int64_t)y) >> DECIMAL_BITS;
+
+    int64_t next_x = xx_64 - yy_64 + (int64_t)cx;
+    int64_t next_y = (xy_64 << 1) + (int64_t)cy;
+
+    if (next_x > INT32_MAX || next_x < INT32_MIN ||
+        next_y > INT32_MAX || next_y < INT32_MIN) {
+      break;
+    }
+
+    x = (fxpt_4_28)next_x;
+    y = (fxpt_4_28)next_y;
+    ++n;
+  }
+  return n;
+}
+\end{lstlisting}
+The structure is slightly different from the original \texttt{do-while}
+loop. We start from $z_0 = 0$ instead of $z_1 = c$, and we test for escape
+\emph{before} computing the next value instead of after. Both loops stop at
+the first $n$ for which $|z_n|^2 \geq 4$, so they return the same iteration
+count. Our version also skips the cross product $xy$ for a point that has
+already escaped.
+
+\subsection{Drawing loop and \texttt{main}}
+
+In \texttt{draw\_fractal}, the pixel coordinates are now
+\texttt{fxpt\_4\_28} values, and they are advanced with the saturating adder:
+\begin{lstlisting}
+fxpt_4_28 fixed_add(fxpt_4_28 a, fxpt_4_28 b) {
+  int64_t result = (int64_t)a + (int64_t)b;
+  if (result > INT32_MAX) return INT32_MAX;
+  if (result < INT32_MIN) return INT32_MIN;
+  return (fxpt_4_28)result;
+}
+\end{lstlisting}
+
+In \texttt{main\_fxpt.c}, the view-port constants are converted at compile
+time:
+\begin{lstlisting}
+const fxpt_4_28 FRAC_WIDTH = DOUBLE_TO_FXPT_4_28(3.0);
+const fxpt_4_28 CX_0       = DOUBLE_TO_FXPT_4_28(-2.0);
+const fxpt_4_28 CY_0       = DOUBLE_TO_FXPT_4_28(-1.5);
+...
+fxpt_4_28 delta = FRAC_WIDTH / SCREEN_WIDTH;
+\end{lstlisting}
+Dividing a fixed-point number by a plain integer requires no scaling, so
+\texttt{delta} is an ordinary integer division. In this case it is even
+exact: $3 \cdot 2^{28} / 2^9 = 3 \cdot 2^{19}$.
+
+We also made two smaller changes to \texttt{main}:
+\begin{itemize}
+  \item The frame buffer ($512 \times 512 \times 2$ bytes $= 512$\,KiB) was
+        moved from the stack to a \texttt{static} global array. A buffer this
+        large is too big for the stack.
+  \item The screen size is now defined with \texttt{\#define} instead of
+        \texttt{const int}. In C, a \texttt{const int} is not a constant
+        expression, so it cannot be used to size a static array.
+\end{itemize}
+
+\section{Results and observations}
+
+The program compiles without errors, and we ran it on the virtual prototype.
+It draws the same Mandelbrot image as the floating-point version. With the
+default view and $N_{max} = 64$, the 28 fractional bits are many more than
+the pixel step needs ($\delta = 3/512 \approx 5.9 \times 10^{-3}$), so we
+saw no visible difference between the two images.
+
+% TODO: add the measured execution times / cycle counts if you have them, e.g.
+% \begin{center}
+% \begin{tabular}{lr}
+%   \toprule
+%   Version & Execution time \\
+%   \midrule
+%   \texttt{fractal\_flpt} (soft-float) & ... \\
+%   \texttt{fractal\_fxpt} (Q4.28)      & ... \\
+%   \bottomrule
+% \end{tabular}
+% \end{center}
+The main difference is speed: the fixed-point version draws the image
+noticeably faster than the floating-point version. The \texttt{float} version
+calls a software library routine for every addition and multiplication. In the
+fixed-point version, additions are single integer instructions, and each
+multiplication is one 64-bit integer multiplication followed by a shift.
+
+\section{Conclusion}
+
+We converted the Mandelbrot program from \texttt{float} to the Q4.28
+fixed-point format. Four integer bits are just enough to hold every
+intermediate value of the iteration, and the remaining 28 bits give a fine
+resolution for the zoom exercise that comes later. Computing products in
+64 bits and shifting the result right by 28 keeps the decimal point in place,
+and checking ranges before storing values back into 32 bits prevents silent
+overflow. The result is an image identical to the floating-point version,
+computed without any floating-point operation at run time.
+
+\end{document}

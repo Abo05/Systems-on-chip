@@ -1,25 +1,39 @@
 #include "fractal_myflpt.h"
 #include <swap.h>
 
+
+static inline flt_8exp_t mul2_float(flt_8exp_t val) {
+    if ((val & MAX) == 0) {
+        return 0;
+    }
+    uint32_t exp = (val >> MANTISA_BITS) & EXPONENT_MASK;
+    if (exp < MAX_EXPONENT) {
+        val += (1U << MANTISA_BITS);
+    } else {
+        val |= MAX;
+    }
+    return val;
+}
+
 //! \brief  Mandelbrot fractal point calculation function
 //! \param  cx    x-coordinate
 //! \param  cy    y-coordinate
 //! \param  n_max maximum number of iterations
 //! \return       number of performed iterations at coordinate (cx, cy)
-uint16_t calc_mandelbrot_point_soft(float cx, float cy, uint16_t n_max) {
-  float x = cx;
-  float y = cy;
+uint16_t calc_mandelbrot_point_soft(flt_8exp_t cx, flt_8exp_t cy, uint16_t n_max) {
+  flt_8exp_t x = cx;
+  flt_8exp_t y = cy;
   uint16_t n = 0;
-  float xx, yy, two_xy;
+  flt_8exp_t xx, yy, two_xy;
   do {
-    xx = x * x;
-    yy = y * y;
-    two_xy = 2 * x * y;
+    xx = mul_float(x, x);
+    yy = mul_float(y, y);
+    two_xy = mul2_float(mul_float(x, y));
 
-    x = xx - yy + cx;
-    y = two_xy + cy;
+    x = sum_float(sub_float(xx, yy), cx);
+    y = sum_float(two_xy, cy);
     ++n;
-  } while (((xx + yy) < 4) && (n < n_max));
+  } while ((sum_float(xx, yy) < FLOAT_FOUR) && (n < n_max));
   return n;
 }
 
@@ -100,17 +114,17 @@ rgb565 iter_to_colour1(uint16_t iter, uint16_t n_max) {
 //! \param  n_max  maximum number of iterations
 void draw_fractal(rgb565 *fbuf, int width, int height,
                   calc_frac_point_p cfp_p, iter_to_colour_p i2c_p,
-                  float cx_0, float cy_0, float delta, uint16_t n_max) {
+                  flt_8exp_t cx_0, flt_8exp_t cy_0, flt_8exp_t delta, uint16_t n_max) {
   rgb565 *pixel = fbuf;
-  float cy = cy_0;
+  flt_8exp_t cy = cy_0;
   for (int k = 0; k < height; ++k) {
-    float cx = cx_0;
+    flt_8exp_t cx = cx_0;
     for(int i = 0; i < width; ++i) {
       uint16_t n_iter = (*cfp_p)(cx, cy, n_max);
       rgb565 colour = (*i2c_p)(n_iter, n_max);
       *(pixel++) = colour;
-      cx += delta;
+      cx = sum_float(cx, delta);
     }
-    cy += delta;
-  }
+    cy = sum_float(cy, delta);  
+    }
 }

@@ -10,16 +10,18 @@ const int SCREEN_WIDTH = 512;   //!< screen width
 const int SCREEN_HEIGHT = 512;  //!< screen height
 
 // Constants describing the initial view port on the fractal function
-const float FRAC_WIDTH = 3.0; //!< default fractal width (3.0 in Q4.28)
-const float CX_0 = -2.0;      //!< default start x-coordinate (-2.0 in Q4.28)
-const float CY_0 = -1.5;      //!< default start y-coordinate (-1.5 in Q4.28)
+// -2.0 = -1.0 * 2^1 -> exp = 1, mant = 0
+const flt_8exp_t CX_0 = FLT_MAKE(1, 1, 0);      //!< default start x-coordinate (-2.0)
+// -1.5 = -1.5 * 2^0 -> exp = 0, mant = 0.5 (bit MANTISA_BITS - 1)
+const flt_8exp_t CY_0 = FLT_MAKE(1, 0, 1U << (MANTISA_BITS - 1));      //!< default start y-coordinate (-1.5)
 const uint16_t N_MAX = 64;    //!< maximum number of iterations
 
 int main() {
    volatile unsigned int *vga = (unsigned int *) 0x50000020;
    volatile unsigned int reg, hi;
    rgb565 frameBuffer[SCREEN_WIDTH*SCREEN_HEIGHT];
-   float delta = FRAC_WIDTH / SCREEN_WIDTH;
+   // delta = 3.0 / 512 = 1.5 * 2^(-8) -> exp = -8, mant = 0.5 (bit MANTISA_BITS - 1)
+   volatile flt_8exp_t delta = FLT_MAKE(0, -8, 1U << (MANTISA_BITS - 1));
    int i;
    vga_clear();
    printf("Starting drawing a fractal\n");
@@ -30,6 +32,7 @@ int main() {
    icache_enable(1);
    dcache_enable(1);
 #endif
+   // printf("");
    /* Enable the vga-controller's graphic mode */
    vga[0] = swap_u32(SCREEN_WIDTH);
    vga[1] = swap_u32(SCREEN_HEIGHT);

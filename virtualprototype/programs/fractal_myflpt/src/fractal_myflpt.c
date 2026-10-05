@@ -1,16 +1,16 @@
-#include "../include/fractal_myflpt.h"
+#include "fractal_myflpt.h"
 #include <swap.h>
 
 
 static inline flt_8exp_t mul2_float(flt_8exp_t val) {
-    if (val == 0 || val == (1U << 31)) {
+    if ((val & MAX) == 0) {
         return 0;
     }
-    uint32_t exp = (val >> 23) & 0xFFU;
-    if (exp < 255) {
-        val += (1U << 23);
+    uint32_t exp = (val >> MANTISA_BITS) & EXPONENT_MASK;
+    if (exp < MAX_EXPONENT) {
+        val += (1U << MANTISA_BITS);
     } else {
-        val |=  0x7FFFFFFFU;
+        val |= MAX;
     }
     return val;
 }
@@ -33,7 +33,7 @@ uint16_t calc_mandelbrot_point_soft(flt_8exp_t cx, flt_8exp_t cy, uint16_t n_max
     x = sum_float(sub_float(xx, yy), cx);
     y = sum_float(two_xy, cy);
     ++n;
-  } while ((sum_float(xx, yy) < (252U << 23)) && (n < n_max));
+  } while ((sum_float(xx, yy) < FLOAT_FOUR) && (n < n_max));
   return n;
 }
 
